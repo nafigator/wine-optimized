@@ -131,6 +131,7 @@ jobs:
             "https://dl.winehq.org/wine/source/${WINE_URL_VERSION}/wine-${WINE_VERSION}.tar.xz"
           tar xf "wine-${WINE_VERSION}.tar.xz"
           echo "Source extracted: wine-${WINE_VERSION}"
+          rm "wine-${WINE_VERSION}.tar.xz"
 
       - name: Configure Wine
         working-directory: wine-${{ env.WINE_VERSION }}
