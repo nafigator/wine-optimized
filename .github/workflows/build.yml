@@ -1,0 +1,190 @@
+name: Build Wine (WoW64, Clang) optimized
+
+on:
+  workflow_dispatch:
+    inputs:
+      wine_version:
+        description: 'Wine version (e.g. 11.0, 10.0)'
+        required: true
+        default: '11.0'
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  WINE_VERSION: ${{ inputs.wine_version || '11.0' }}
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+  # llvm-mingw release to use
+  LLVM_MINGW_VERSION: '20260922'
+
+jobs:
+  build:
+    runs-on: self-hosted
+    container:
+      image: devuan/devuan:excalibur
+      options: --user root
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          echo "deb     http://mirror.yandex.ru/mirrors/devuan/merged excalibur main" > /etc/apt/sources.list
+          echo "deb     http://mirror.yandex.ru/mirrors/devuan/merged excalibur-updates main" >> /etc/apt/sources.list
+          echo "deb     http://mirror.yandex.ru/mirrors/devuan/merged excalibur-security main" >> /etc/apt/sources.list
+          apt update
+
+          dpkg --add-architecture i386
+          apt update
+
+          apt install -y --no-install-recommends \
+            build-essential gcc-multilib g++-multilib \
+            clang lld llvm \
+            ccache flex bison pkg-config \
+            libc6-dev-i386 \
+            libx11-dev libx11-dev:i386 \
+            libxext-dev libxext-dev:i386 \
+            libxrender-dev libxrender-dev:i386 \
+            libxrandr-dev libxrandr-dev:i386 \
+            libxi-dev libxi-dev:i386 \
+            libxcursor-dev libxcursor-dev:i386 \
+            libxfixes-dev libxfixes-dev:i386 \
+            libxcomposite-dev libxcomposite-dev:i386 \
+            libfreetype-dev libfreetype-dev:i386 \
+            libfontconfig-dev libfontconfig-dev:i386 \
+            libgnutls28-dev libgnutls28-dev:i386 \
+            libasound2-dev libasound2-dev:i386 \
+            libpulse-dev libpulse-dev:i386 \
+            libdbus-1-dev libdbus-1-dev:i386 \
+            libunwind-dev libunwind-dev:i386 \
+            libgl-dev libgl-dev:i386 \
+            libvulkan-dev libvulkan-dev:i386 \
+            libsdl2-dev libsdl2-dev:i386 \
+            libudev-dev libudev-dev:i386 \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libosmesa6-dev libosmesa6-dev:i386 \
+            libcups2-dev libcups2-dev:i386 \
+            libkrb5-dev libkrb5-dev:i386 \
+            samba-dev ocl-icd-opencl-dev \
+            libpcap-dev libusb-1.0-0-dev libv4l-dev \
+            libxml2-dev libxslt1-dev \
+            libjpeg-dev libpng-dev libtiff-dev \
+            libmpg123-dev liblcms2-dev \
+            libfaudio-dev libfaudio-dev:i386 \
+            libvkd3d-dev libvkd3d-dev:i386 \
+            libwayland-dev wayland-protocols libxkbregistry-dev \
+            wget xz-utils git ca-certificates
+
+      - name: Install llvm-mingw
+        run: |
+          LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          wget -q --show-progress "$LLVM_MINGW_URL" -O /tmp/llvm-mingw.tar.xz
+          mkdir -p /opt/llvm-mingw
+          tar -xJf /tmp/llvm-mingw.tar.xz -C /opt/llvm-mingw --strip-components=1
+          rm /tmp/llvm-mingw.tar.xz
+
+          # Add to PATH
+          echo "/opt/llvm-mingw/bin" >> "$GITHUB_PATH"
+          echo "PATH=/opt/llvm-mingw/bin:$PATH" >> "$GITHUB_ENV"
+
+          # Verify
+          echo "--- llvm-mingw x86_64 clang ---"
+          /opt/llvm-mingw/bin/x86_64-w64-mingw32-clang --version | head -3
+          echo "--- llvm-mingw i686 clang ---"
+          /opt/llvm-mingw/bin/i686-w64-mingw32-clang --version | head -3
+          echo "--- lld-link ---"
+          /opt/llvm-mingw/bin/lld-link --version | head -3
+
+      - name: Restore ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wine-clang-mingw-${{ env.WINE_VERSION }}-${{ github.sha }}
+          restore-keys: |
+            ccache-wine-clang-mingw-${{ env.WINE_VERSION }}-
+            ccache-wine-clang-mingw-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size="$CCACHE_MAXSIZE"
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache -s
+
+      - name: Download Wine source
+        run: |
+          WINE_MAJOR="$(echo "$WINE_VERSION" | cut -d. -f1)"
+          WINE_MINOR="$(echo "$WINE_VERSION" | cut -d. -f2)"
+          if [ "$WINE_MINOR" = "0" ]; then
+            WINE_URL_VERSION="${WINE_MAJOR}.0"
+          else
+            WINE_URL_VERSION="${WINE_MAJOR}.x"
+          fi
+          wget -q --show-progress \
+            "https://dl.winehq.org/wine/source/${WINE_URL_VERSION}/wine-${WINE_VERSION}.tar.xz"
+          tar xf "wine-${WINE_VERSION}.tar.xz"
+          echo "Source extracted: wine-${WINE_VERSION}"
+
+      - name: Configure Wine
+        working-directory: wine-${{ env.WINE_VERSION }}
+        env:
+          # Unix part: system Clang with ccache
+          CC: ccache clang
+          CXX: ccache clang++
+          CFLAGS: -march=x86-64-v4 -mtune=znver4 -O3 -fomit-frame-pointer -falign-functions=32 -falign-loops=32
+          CXXFLAGS: -march=x86-64-v4 -mtune=znver4 -O3 -fomit-frame-pointer -falign-functions=32 -falign-loops=32
+          LDFLAGS: -fuse-ld=lld -Wl,-O1,--sort-common,--as-needed
+
+          # Cross part: llvm-mingw Clang with ccache
+          CROSSCC: ccache x86_64-w64-mingw32-clang
+          CROSSCXX: ccache x86_64-w64-mingw32-clang++
+          CROSSCFLAGS: -march=x86-64-v4 -mtune=znver4 -O3 -fomit-frame-pointer -falign-functions=32 -falign-loops=32
+          CROSSCXXFLAGS: -march=x86-64-v4 -mtune=znver4 -O3 -fomit-frame-pointer -falign-functions=32 -falign-loops=32
+          CROSSLDFLAGS: -fuse-ld=lld
+        run: |
+          ./configure \
+            --enable-archs=i386,x86_64 \
+            --disable-winemenubuilder \
+            --disable-win16 \
+            --disable-tests \
+            --without-oss \
+            --prefix=/opt/wine-${WINE_VERSION}
+
+      - name: Build Wine
+        working-directory: wine-${{ env.WINE_VERSION }}
+        run: |
+          make -j$(nproc)
+
+      - name: Install Wine
+        working-directory: wine-${{ env.WINE_VERSION }}
+        run: |
+          make install
+
+      - name: Package Wine
+        run: |
+          BUILD_NAME="wine-${WINE_VERSION}-wow64-amd64-clang"
+          mv "/opt/wine-${WINE_VERSION}" "/opt/${BUILD_NAME}"
+          rm -rf "/opt/${BUILD_NAME}/include" \
+                 "/opt/${BUILD_NAME}/share/applications" \
+                 "/opt/${BUILD_NAME}/share/man"
+          cd /opt
+          tar -cJf "${GITHUB_WORKSPACE}/${BUILD_NAME}.tar.xz" "${BUILD_NAME}"
+          ls -lh "${GITHUB_WORKSPACE}/${BUILD_NAME}.tar.xz"
+
+      - name: Show ccache stats
+        if: always()
+        run: ccache -s
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wine-wow64-${{ env.WINE_VERSION }}
+          path: ./*.tar.xz
+          retention-days: 5
